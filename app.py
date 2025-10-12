@@ -1,15 +1,24 @@
 from flask import Flask, request
-import os
 
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    # Discord通知（MacroDroid経由）のテキストを受け取る
-    text = request.data.decode('utf-8')  # プレーンテキストで受信
+    text = request.data.decode('utf-8')
+    flags = {
+        "flag1": "BTCUSDT 144m" in text and "青玉" in text,
+        "flag2": "BTCUSDT 144m" in text and "陽線" in text,
+        "flag3": "BTCUSDT 144m" in text and "金玉" in text,
+        "flag4": "BTCUSDT 144m" in text and "陰線" in text,
+    }
+
     print(f"通知受信: {text}")
+    print(f"立ったフラグ: {flags}")
+
+    # ここでフラグに応じて注文処理を呼び出せる
+    # 例: if flags["flag1"]: place_order(...)
+
     return "OK", 200
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))  # Render が割り当てたポートを使用
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=5000)
