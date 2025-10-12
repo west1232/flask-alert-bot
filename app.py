@@ -1,109 +1,128 @@
+# app.py
+from flask import Flask, request, jsonify
 import os
 import time
+import requests
 import hmac
 from hashlib import sha256
-import requests
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
-
-# .env読み込み
-load_dotenv()
-
-APIURL = "https://testnet.bingx.com"
-APIKEY = os.getenv("BINGX_APIKEY")
-SECRETKEY = os.getenv("BINGX_SECRETKEY")
 
 app = Flask(__name__)
 
-# --- 補助関数 ---
+# Render 上で設定した環境変数から取得
+APIKEY = os.environ.get("APIKEY")
+SECRETKEY = os.environ.get("SECRETKEY")
+APIURL = "https://open-api.bingx.com"
+
+# フラグ判定関数
+def get_flag(text):
+    text = text.upper()
+    if "BTCUSDT 144M 青玉" in text:
+        return 1
+    elif "BTCUSDT 144M 陽線" in text:
+        return 2
+    elif "BTCUSDT 144M 金玉" in text:
+        return 3
+    elif "BTCUSDT 144M 陰線" in text:
+        return 4
+    else:
+        return 0  # 該当なし
+
+# シグネチャ作成
 def get_sign(secret, payload):
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), digestmod=sha256).hexdigest()
 
-def get_symbol_price(symbol="BTC-USDT"):
-    """現在価格を取得"""
-    path = f"/openApi/swap/v2/market/ticker/price?symbol={symbol}"
-    resp = requests.get(APIURL + path)
-    data = resp.json()
-    return float(data.get("price", 0))
-
-def send_order(symbol, side, usdt_amount, leverage, stop_loss_pct, trail_take_pct, trail_pct):
-    """テストネット用の成行注文発注"""
-    current_price = get_symbol_price(symbol)
-    quantity = round(usdt_amount / current_price, 6)  # BTC数量に換算
-
-    # 損切・トレーリング価格計算
-    if side == "BUY":
-        stop_price = round(current_price * (1 - stop_loss_pct/100), 2)
-        activate_price = round(current_price * (1 + trail_take_pct/100), 2)
+# パラメータを文字列化
+def parse_params(params):
+    sorted_keys = sorted(params)
+    params_str = "&".join([f"{k}={params[k]}" for k in sorted_keys])
+    if params_str != "":
+        params_str += f"&timestamp={int(time.time() * 1000)}"
     else:
-        stop_price = round(current_price * (1 + stop_loss_pct/100), 2)
-        activate_price = round(current_price * (1 - trail_take_pct/100), 2)
-    
-    path = "/openApi/swap/v2/trade/order/test"
-    method = "POST"
-    
-    paramsMap = {
+        params_str = f"timestamp={int(time.time() * 1000)}"
+    return params_str
+
+# APIリクエスト
+def send_request(method, path, params_map):
+    params_str = parse_params(params_map)
+    signature = get_sign(SECRETKEY, params_str)
+    url = f"{APIURL}{path}?{params_str}&signature={signature}"
+    headers = {
+        "X-BX-APIKEY": APIKEY,
+        "Content-Type": "application/json"
+    }
+    response = requests.request(method, url, headers=headers)
+    return response.text
+
+# 注文作成（テストネット）
+def place_order(flag):
+    # デフォルトパラメータ
+    symbol = "BTC-USDT"
+    leverage = 10
+    margin_type = "SEPARATE_ISOLATED"
+    amount_usdt = 100
+    side = "BUY"  # ロング
+    position_side = "LONG"
+    take_profit_price = None
+    stop_loss_price = None
+    trailing_percent = None
+
+    # フラグごとの設定
+    if flag == 1:  # ロング 青玉
+        side = "BUY"
+        position_side = "LONG"
+        stop_loss_price = -50  # %損切り
+        take_profit_price = 25  # %トレーリング利確発動
+        trailing_percent = 5
+    elif flag == 2:  # ロング 陽線
+        side = "BUY"
+        position_side = "LONG"
+        stop_loss_price = -50
+        take_profit_price = 25
+        trailing_percent = 5
+    elif flag == 3:  # ショート 金玉
+        side = "SELL"
+        position_side = "SHORT"
+        stop_loss_price = -50
+        take_profit_price = 35
+        trailing_percent = 5
+    elif flag == 4:  # ショート 陰線
+        side = "SELL"
+        position_side = "SHORT"
+        stop_loss_price = -50
+        take_profit_price = 35
+        trailing_percent = 5
+    else:
+        return "No action"
+
+    # 注文パラメータ
+    params_map = {
         "symbol": symbol,
         "side": side,
-        "positionSide": "LONG" if side=="BUY" else "SHORT",
+        "positionSide": position_side,
         "type": "MARKET",
-        "quantity": quantity,
+        "quantity": amount_usdt,
         "leverage": leverage,
-        "marginType": "ISOLATED",
-        "stopLoss": {
-            "type": "STOP_MARKET",
-            "stopPrice": stop_price,
-            "workingType": "MARK_PRICE"
-        },
-        "trailingTakeProfit": {
-            "activatePrice": activate_price,
-            "callbackRate": trail_pct,
-            "workingType": "MARK_PRICE"
-        }
+        "marginType": margin_type,
+        # 以下は実装例として JSON 文字列で渡す（BingX の形式に合わせて調整）
+        "takeProfit": f'{{"type":"TAKE_PROFIT_MARKET","stopPrice":{take_profit_price},"price":{take_profit_price},"workingType":"MARK_PRICE"}}',
+        "stopLoss": f'{{"type":"STOP_MARKET","stopPrice":{stop_loss_price},"workingType":"MARK_PRICE"}}',
+        "trailingStop": f'{{"activationPrice":{take_profit_price},"callbackRate":{trailing_percent}}}'
     }
-    
-    timestamp = int(time.time() * 1000)
-    paramsStr = "&".join([f"{k}={paramsMap[k]}" for k in paramsMap])
-    paramsStr += f"&timestamp={timestamp}"
-    signature = get_sign(SECRETKEY, paramsStr)
-    
-    url = f"{APIURL}{path}?{paramsStr}&signature={signature}"
-    headers = {"X-BX-APIKEY": APIKEY}
-    resp = requests.post(url, headers=headers, json={})
-    return resp.json()
 
-# --- Webhook & 判定 ---
+    return send_request("POST", "/openApi/swap/v2/trade/order/test", params_map)
+
+# Webhook 受信
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    text = request.data.decode("utf-8")
-    print(f"通知受信: {text}")
-    
-    order_params = []
-
-    # フラグ判定
-    if "BTCUSDT 144m" in text and "青玉" in text:
-        order_params.append({"side":"BUY","stop_loss":50,"trail_tp":25,"trail_width":5})
-    elif "BTCUSDT 144m" in text and "陽線" in text:
-        order_params.append({"side":"BUY","stop_loss":50,"trail_tp":25,"trail_width":5})
-    elif "BTCUSDT 144m" in text and "金玉" in text:
-        order_params.append({"side":"SELL","stop_loss":50,"trail_tp":35,"trail_width":5})
-    elif "BTCUSDT 144m" in text and "陰線" in text:
-        order_params.append({"side":"SELL","stop_loss":50,"trail_tp":35,"trail_width":5})
-    
-    results = []
-    for op in order_params:
-        res = send_order(
-            symbol="BTC-USDT",
-            side=op["side"],
-            usdt_amount=100,
-            leverage=10,
-            stop_loss_pct=op["stop_loss"],
-            trail_take_pct=op["trail_tp"],
-            trail_pct=op["trail_width"]
-        )
-        results.append(res)
-    
-    return jsonify({"status":"ok","orders":results})
+    try:
+        text = request.data.decode("utf-8")
+        flag = get_flag(text)
+        result = place_order(flag)
+        print(f"通知受信: {text}, フラグ: {flag}, 注文結果: {result}")
+        return jsonify({"status": "ok", "flag": flag, "result": result})
+    except Exception as e:
+        print("Error:", e)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
