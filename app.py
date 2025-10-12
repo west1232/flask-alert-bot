@@ -1,18 +1,13 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request
 
 app = Flask(__name__)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.json
-    text = data.get("text", "")
-    print("通知受信:", text)
+    # Discord通知（MacroDroid経由）のテキストを受け取る
+    text = request.data.decode('utf-8')  # ← JSONではなくプレーンテキストで受信
+    print(f"通知受信: {text}")
+    return "OK", 200
 
-    if "BUY_SIGNAL" in text:
-        print("🚀 BUY_SIGNAL 検知！自動売買を実行！")
-        # ここに取引所API呼び出しを後で追加予定
-
-    return jsonify({"status": "ok"}), 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
