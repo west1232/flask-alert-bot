@@ -60,17 +60,15 @@ def place_order(symbol, side, positionSide):
     if not current_price:
         return {"error": "価格取得に失敗しました"}
 
-    # 数量計算（USDT換算）
     qty = round(USDT_AMOUNT * LEVERAGE / current_price, 4)
 
-    # 損切り・利確・トレーリング設定
     if side == "BUY":
-        sl_price = round(current_price * 0.50, 2)       # ▲50%
-        tp_price = round(current_price * 1.25, 2)       # +25%
+        sl_price = round(current_price * 0.50, 2)
+        tp_price = round(current_price * 1.25, 2)
         trailing_pct = 5
     else:
-        sl_price = round(current_price * 1.50, 2)       # +50%
-        tp_price = round(current_price * 0.65, 2)       # -35%
+        sl_price = round(current_price * 1.50, 2)
+        tp_price = round(current_price * 0.65, 2)
         trailing_pct = 5
 
     stop_loss = json.dumps({"type": "STOP_MARKET", "stopPrice": sl_price})
@@ -127,4 +125,5 @@ def webhook():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.logger.setLevel("INFO")
+    # Render が自動で python app.py を実行するのでスタートコマンド不要
     app.run(host="0.0.0.0", port=port)
