@@ -1,26 +1,129 @@
 from flask import Flask, request, jsonify
-import os
+import time, hmac, requests, os, json
+from hashlib import sha256
 
-# 🔹 Flask インスタンスは必ずグローバルに
+# ======================
+# Flask 初期化
+# ======================
 app = Flask(__name__)
 
+# ======================
+# 環境変数
+# ======================
+APIURL = "https://open-api.bingx.com"
+APIKEY = os.environ.get("APIKEY")
+SECRETKEY = os.environ.get("SECRETKEY")
+USE_REAL_ORDERS = os.environ.get("USE_REAL_ORDERS", "false").lower() == "true"
+USDT_AMOUNT = float(os.environ.get("USDT_AMOUNT", 100))
+LEVERAGE = int(os.environ.get("LEVERAGE", 10))
+
+# ======================
+# 汎用関数
+# ======================
+def get_sign(api_secret, payload):
+    return hmac.new(api_secret.encode("utf-8"), payload.encode("utf-8"), digestmod=sha256).hexdigest()
+
+def parseParam(paramsMap):
+    sortedKeys = sorted(paramsMap)
+    paramsStr = "&".join([f"{x}={paramsMap[x]}" for x in sortedKeys])
+    return paramsStr + "&timestamp=" + str(int(time.time() * 1000))
+
+def send_request(method, path, paramsMap, retry=3):
+    paramsStr = parseParam(paramsMap)
+    signature = get_sign(SECRETKEY, paramsStr)
+    url = f"{APIURL}{path}?{paramsStr}&signature={signature}"
+    headers = {'X-BX-APIKEY': APIKEY}
+    
+    for i in range(retry):
+        try:
+            response = requests.request(method, url, headers=headers, timeout=10)
+            return response.json()
+        except Exception as e:
+            app.logger.warning(f"API request failed ({i+1}/{retry}): {e}")
+            time.sleep(1)
+    return {"error": "API request failed after retries"}
+
+def get_current_price(symbol="BTC-USDT"):
+    try:
+        url = f"{APIURL}/openApi/swap/v2/quote/price?symbol={symbol}"
+        res = requests.get(url, timeout=5)
+        return float(res.json()["data"]["price"])
+    except Exception as e:
+        app.logger.error(f"価格取得失敗: {e}")
+        return None
+
+# ======================
+# 発注関数（クロス、SL/TP/トレーリング）
+# ======================
+def place_order(symbol, side, positionSide):
+    current_price = get_current_price(symbol)
+    if not current_price:
+        return {"error": "価格取得に失敗しました"}
+
+    # 数量計算（USDT換算）
+    qty = round(USDT_AMOUNT * LEVERAGE / current_price, 4)
+
+    # 損切り・利確・トレーリング設定
+    if side == "BUY":
+        sl_price = round(current_price * 0.50, 2)       # ▲50%
+        tp_price = round(current_price * 1.25, 2)       # +25%
+        trailing_pct = 5
+    else:
+        sl_price = round(current_price * 1.50, 2)       # +50%
+        tp_price = round(current_price * 0.65, 2)       # -35%
+        trailing_pct = 5
+
+    stop_loss = json.dumps({"type": "STOP_MARKET", "stopPrice": sl_price})
+    take_profit = json.dumps({"type": "TRAILING_STOP_MARKET", "activationPrice": tp_price, "callbackRate": trailing_pct})
+
+    path = "/openApi/swap/v2/trade/order" if USE_REAL_ORDERS else "/openApi/swap/v2/trade/order/test"
+
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "positionSide": positionSide,
+        "type": "MARKET",
+        "quantity": qty,
+        "marginType": "CROSSED",
+        "leverage": LEVERAGE,
+        "takeProfit": take_profit,
+        "stopLoss": stop_loss,
+    }
+
+    result = send_request("POST", path, params)
+    return {
+        "mode": "REAL" if USE_REAL_ORDERS else "TEST",
+        "entry_price": current_price,
+        "tp_price": tp_price,
+        "sl_price": sl_price,
+        "params": params,
+        "api_result": result
+    }
+
+# ======================
+# Webhook
+# ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # POST データ取得
-    if request.data:
-        text = request.data.decode("utf-8").strip()
-    elif request.form:
-        text = next(iter(request.form.values()))
-    else:
-        text = ""
-
-    # ログ出力
+    text = request.data.decode("utf-8").strip() if request.data else ""
     app.logger.info(f"通知受信: {text}")
 
-    # レスポンスを返すだけ
-    return jsonify({"status": "ok", "received_text": text})
+    flag = 0
+    order_info = {}
 
-# Render の場合 gunicorn で起動するため main 内での Flask インスタンス作成は不要
+    if "BTCUSDT 144m" in text:
+        if "青玉" in text or "陽線" in text:
+            flag = 1 if "青玉" in text else 2
+            order_info = place_order("BTC-USDT", "BUY", "LONG")
+        elif "金玉" in text or "陰線" in text:
+            flag = 3 if "金玉" in text else 4
+            order_info = place_order("BTC-USDT", "SELL", "SHORT")
+
+    return jsonify({"status": "ok", "flag": flag, "order_info": order_info})
+
+# ======================
+# メイン
+# ======================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.logger.setLevel("INFO")
