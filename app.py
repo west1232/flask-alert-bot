@@ -1,123 +1,128 @@
 from flask import Flask, request, jsonify
-import requests
-import time
-import hmac
-import hashlib
-import os
+import time, hmac, requests, os, json
+from hashlib import sha256
+from dotenv import load_dotenv
+
+# ======================
+# 初期設定
+# ======================
+load_dotenv()
+APIURL = "https://open-api.bingx.com"
+APIKEY = os.getenv("APIKEY")
+SECRETKEY = os.getenv("SECRETKEY")
+USE_REAL_ORDERS = os.getenv("USE_REAL_ORDERS", "false").lower() == "true"
+USDT_AMOUNT = float(os.getenv("USDT_AMOUNT", 100))
+LEVERAGE = int(os.getenv("LEVERAGE", 10))
 
 app = Flask(__name__)
 
-# === BingX 接続情報 ===
-API_URL = "https://open-api.bingx.com"
-APIKEY = os.getenv("APIKEY")
-SECRETKEY = os.getenv("SECRETKEY")
+# ======================
+# 汎用関数
+# ======================
+def get_sign(api_secret, payload):
+    return hmac.new(api_secret.encode("utf-8"), payload.encode("utf-8"), digestmod=sha256).hexdigest()
 
-# === 署名作成関数 ===
-def get_sign(secret, query_string):
-    return hmac.new(secret.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+def parseParam(paramsMap):
+    sortedKeys = sorted(paramsMap)
+    paramsStr = "&".join([f"{x}={paramsMap[x]}" for x in sortedKeys])
+    return paramsStr + "&timestamp=" + str(int(time.time() * 1000))
 
-# === パラメータ整形 ===
-def parse_params(params):
-    params['timestamp'] = int(time.time() * 1000)
-    return '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-
-# === API送信関数（署名付き） ===
-def send_signed_request(method, path, params):
-    query_string = parse_params(params)
-    signature = get_sign(SECRETKEY, query_string)
-    url = f"{API_URL}{path}?{query_string}&signature={signature}"
+def send_request(method, path, paramsMap, retry=3):
+    paramsStr = parseParam(paramsMap)
+    signature = get_sign(SECRETKEY, paramsStr)
+    url = f"{APIURL}{path}?{paramsStr}&signature={signature}"
     headers = {'X-BX-APIKEY': APIKEY}
-    response = requests.request(method, url, headers=headers)
+    
+    for i in range(retry):
+        try:
+            response = requests.request(method, url, headers=headers, timeout=10)
+            return response.json()
+        except Exception as e:
+            app.logger.warning(f"API request failed ({i+1}/{retry}): {e}")
+            time.sleep(1)
+    return {"error": "API request failed after retries"}
+
+def get_current_price(symbol="BTC-USDT"):
     try:
-        return response.json()
-    except Exception:
-        return {"error": response.text}
+        url = f"{APIURL}/openApi/swap/v2/quote/price?symbol={symbol}"
+        res = requests.get(url, timeout=5)
+        return float(res.json()["data"]["price"])
+    except Exception as e:
+        app.logger.error(f"価格取得失敗: {e}")
+        return None
 
-# === メインWebhook ===
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    text = request.data.decode('utf-8')
+# ======================
+# 発注関数（クロス、SL/TP/トレーリング反映）
+# ======================
+def place_order(symbol, side, positionSide):
+    current_price = get_current_price(symbol)
+    if not current_price:
+        return {"error": "価格取得に失敗しました"}
 
-    # フラグ識別
-    flag = 0
-    order_result = {}
+    # 数量をUSDT換算で計算
+    qty = round(USDT_AMOUNT * LEVERAGE / current_price, 4)
 
-    # === ① 青玉（ロング） ===
-    if "BTCUSDT 144m 青玉" in text:
-        flag = 1
-        order_result = place_test_order(
-            symbol="BTC-USDT",
-            side="BUY",
-            position_side="LONG",
-            take_profit_trigger=25,
-            trailing_callback=5,
-            stop_loss_percent=-50
-        )
+    # 損切り・利確価格計算
+    if side == "BUY":
+        sl_price = round(current_price * 0.50, 2)       # ▲50%
+        tp_price = round(current_price * 1.25, 2)       # +25%
+        trailing_pct = 5
+    else:  # SELL
+        sl_price = round(current_price * 1.50, 2)       # +50%
+        tp_price = round(current_price * 0.65, 2)       # -35%
+        trailing_pct = 5
 
-    # === ② 陽線（ロング） ===
-    elif "BTCUSDT 144m 陽線" in text:
-        flag = 2
-        order_result = place_test_order(
-            symbol="BTC-USDT",
-            side="BUY",
-            position_side="LONG",
-            take_profit_trigger=25,
-            trailing_callback=5,
-            stop_loss_percent=-50
-        )
+    stop_loss = json.dumps({"type": "STOP_MARKET", "stopPrice": sl_price})
+    take_profit = json.dumps({"type": "TRAILING_STOP_MARKET", "activationPrice": tp_price, "callbackRate": trailing_pct})
 
-    # === ③ 金玉（ショート） ===
-    elif "BTCUSDT 144m 金玉" in text:
-        flag = 3
-        order_result = place_test_order(
-            symbol="BTC-USDT",
-            side="SELL",
-            position_side="SHORT",
-            take_profit_trigger=35,
-            trailing_callback=5,
-            stop_loss_percent=-50
-        )
+    path = "/openApi/swap/v2/trade/order" if USE_REAL_ORDERS else "/openApi/swap/v2/trade/order/test"
 
-    # === ④ 陰線（ショート） ===
-    elif "BTCUSDT 144m 陰線" in text:
-        flag = 4
-        order_result = place_test_order(
-            symbol="BTC-USDT",
-            side="SELL",
-            position_side="SHORT",
-            take_profit_trigger=35,
-            trailing_callback=5,
-            stop_loss_percent=-50
-        )
-
-    else:
-        order_result = {"message": "No matching flag found."}
-
-    return jsonify({"flag": flag, "result": order_result, "status": "ok"})
-
-
-# === 注文実行関数（テスト注文） ===
-def place_test_order(symbol, side, position_side, take_profit_trigger, trailing_callback, stop_loss_percent):
-    """
-    実際の注文では /openApi/swap/v2/trade/order に変更。
-    テスト注文は /openApi/swap/v2/trade/order/test を使用。
-    """
     params = {
         "symbol": symbol,
-        "side": side,                # BUY or SELL
-        "positionSide": position_side,  # LONG or SHORT
-        "type": "MARKET",            # 成行
-        "quantity": 100,             # USDでの想定
-        "reduceOnly": False,
-        "takeProfit": f'{{"type":"TRAILING_STOP_MARKET","callbackRate":{trailing_callback},"activationPrice":0.0}}',
-        "stopLoss": '{"stopPrice":0.0,"type":"STOP_MARKET"}'
+        "side": side,
+        "positionSide": positionSide,
+        "type": "MARKET",
+        "quantity": qty,
+        "marginType": "CROSSED",
+        "leverage": LEVERAGE,
+        "takeProfit": take_profit,
+        "stopLoss": stop_loss,
     }
 
-    # テスト注文API
-    return send_signed_request("POST", "/openApi/swap/v2/trade/order/test", params)
+    result = send_request("POST", path, params)
+    return {
+        "mode": "REAL" if USE_REAL_ORDERS else "TEST",
+        "entry_price": current_price,
+        "tp_price": tp_price,
+        "sl_price": sl_price,
+        "params": params,
+        "api_result": result
+    }
 
+# ======================
+# Webhook
+# ======================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    text = request.data.decode("utf-8").strip()
+    app.logger.info(f"通知受信: {text}")
 
-# === Renderサーバー起動設定 ===
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    flag = 0
+    order_info = {}
 
+    if "BTCUSDT 144m" in text:
+        if "青玉" in text or "陽線" in text:
+            flag = 1 if "青玉" in text else 2
+            order_info = place_order("BTC-USDT", "BUY", "LONG")
+        elif "金玉" in text or "陰線" in text:
+            flag = 3 if "金玉" in text else 4
+            order_info = place_order("BTC-USDT", "SELL", "SHORT")
+
+    return jsonify({"status": "ok", "flag": flag, "order_info": order_info})
+
+# ======================
+# メイン
+# ======================
+if __name__ == "__main__":
+    app.logger.setLevel("INFO")
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
