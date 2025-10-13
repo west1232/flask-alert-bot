@@ -1,12 +1,10 @@
 from flask import Flask, request, jsonify
 import time, hmac, requests, os, json
 from hashlib import sha256
-from dotenv import load_dotenv
 
 # ======================
 # 初期設定
 # ======================
-load_dotenv()
 APIURL = "https://open-api.bingx.com"
 APIKEY = os.getenv("APIKEY")
 SECRETKEY = os.getenv("SECRETKEY")
