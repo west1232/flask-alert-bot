@@ -3,19 +3,23 @@ import time, hmac, requests, os, json
 from hashlib import sha256
 
 # ======================
-# Flask 初期化
+# 環境変数設定
 # ======================
-app = Flask(__name__)
+try:
+    # ローカル実行時のみ .env 読み込み（Renderではスキップ）
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# ======================
-# 環境変数
-# ======================
 APIURL = "https://open-api.bingx.com"
-APIKEY = os.environ.get("APIKEY")
-SECRETKEY = os.environ.get("SECRETKEY")
-USE_REAL_ORDERS = os.environ.get("USE_REAL_ORDERS", "false").lower() == "true"
-USDT_AMOUNT = float(os.environ.get("USDT_AMOUNT", 100))
-LEVERAGE = int(os.environ.get("LEVERAGE", 10))
+APIKEY = os.getenv("APIKEY")
+SECRETKEY = os.getenv("SECRETKEY")
+USE_REAL_ORDERS = os.getenv("USE_REAL_ORDERS", "false").lower() == "true"
+USDT_AMOUNT = float(os.getenv("USDT_AMOUNT", 100))
+LEVERAGE = int(os.getenv("LEVERAGE", 10))
+
+app = Flask(__name__)
 
 # ======================
 # 汎用関数
@@ -53,7 +57,7 @@ def get_current_price(symbol="BTC-USDT"):
         return None
 
 # ======================
-# 発注関数（クロス、SL/TP/トレーリング）
+# 発注関数（クロス取引 + 損切り + トレーリング利確）
 # ======================
 def place_order(symbol, side, positionSide):
     current_price = get_current_price(symbol)
@@ -72,7 +76,11 @@ def place_order(symbol, side, positionSide):
         trailing_pct = 5
 
     stop_loss = json.dumps({"type": "STOP_MARKET", "stopPrice": sl_price})
-    take_profit = json.dumps({"type": "TRAILING_STOP_MARKET", "activationPrice": tp_price, "callbackRate": trailing_pct})
+    take_profit = json.dumps({
+        "type": "TRAILING_STOP_MARKET",
+        "activationPrice": tp_price,
+        "callbackRate": trailing_pct
+    })
 
     path = "/openApi/swap/v2/trade/order" if USE_REAL_ORDERS else "/openApi/swap/v2/trade/order/test"
 
@@ -103,7 +111,7 @@ def place_order(symbol, side, positionSide):
 # ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    text = request.data.decode("utf-8").strip() if request.data else ""
+    text = request.data.decode("utf-8").strip()
     app.logger.info(f"通知受信: {text}")
 
     flag = 0
@@ -120,10 +128,9 @@ def webhook():
     return jsonify({"status": "ok", "flag": flag, "order_info": order_info})
 
 # ======================
-# メイン
+# 起動（Render / ローカル両対応）
 # ======================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5000))  # RenderはPORT、ローカルは5000
     app.logger.setLevel("INFO")
-    # Render が自動で python app.py を実行するのでスタートコマンド不要
     app.run(host="0.0.0.0", port=port)
