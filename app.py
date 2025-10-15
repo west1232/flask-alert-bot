@@ -3,21 +3,14 @@ import time, hmac, requests, os, json
 from hashlib import sha256
 
 # ======================
-# 環境変数設定
+# 初期設定
 # ======================
-try:
-    # ローカル実行時のみ .env 読み込み（Renderではスキップ）
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
 APIURL = "https://open-api.bingx.com"
-APIKEY = os.getenv("APIKEY")
-SECRETKEY = os.getenv("SECRETKEY")
-USE_REAL_ORDERS = os.getenv("USE_REAL_ORDERS", "false").lower() == "true"
-USDT_AMOUNT = float(os.getenv("USDT_AMOUNT", 100))
-LEVERAGE = int(os.getenv("LEVERAGE", 10))
+APIKEY = os.environ.get("APIKEY")
+SECRETKEY = os.environ.get("SECRETKEY")
+USE_REAL_ORDERS = os.environ.get("USE_REAL_ORDERS", "false").lower() == "true"
+USDT_AMOUNT = float(os.environ.get("USDT_AMOUNT", 100))
+LEVERAGE = int(os.environ.get("LEVERAGE", 10))
 
 app = Flask(__name__)
 
@@ -57,30 +50,30 @@ def get_current_price(symbol="BTC-USDT"):
         return None
 
 # ======================
-# 発注関数（クロス取引 + 損切り + トレーリング利確）
+# 発注関数（クロス、SL/TP/トレーリング反映）
 # ======================
 def place_order(symbol, side, positionSide):
     current_price = get_current_price(symbol)
     if not current_price:
         return {"error": "価格取得に失敗しました"}
 
+    # 数量をUSDT換算で計算
     qty = round(USDT_AMOUNT * LEVERAGE / current_price, 4)
 
-    if side == "BUY":
-        sl_price = round(current_price * 0.50, 2)
-        tp_price = round(current_price * 1.25, 2)
-        trailing_pct = 5
-    else:
-        sl_price = round(current_price * 1.50, 2)
-        tp_price = round(current_price * 0.65, 2)
-        trailing_pct = 5
+    # ----------------------
+    # TP/SL/トレーリング（レバレッジ除外1/10で計算）
+    # ----------------------
+    if side == "BUY":  # ロング
+        sl_price = round(current_price * 0.95, 2)       # ▲50% → 1/10
+        tp_price = round(current_price * 1.025, 2)      # +25% → 1/10
+        trailing_pct = 0.5
+    else:  # SELL / ショート
+        sl_price = round(current_price * 1.05, 2)       # +50% → 1/10
+        tp_price = round(current_price * 0.965, 2)      # −35% → 1/10
+        trailing_pct = 0.5
 
     stop_loss = json.dumps({"type": "STOP_MARKET", "stopPrice": sl_price})
-    take_profit = json.dumps({
-        "type": "TRAILING_STOP_MARKET",
-        "activationPrice": tp_price,
-        "callbackRate": trailing_pct
-    })
+    take_profit = json.dumps({"type": "TRAILING_STOP_MARKET", "activationPrice": tp_price, "callbackRate": trailing_pct})
 
     path = "/openApi/swap/v2/trade/order" if USE_REAL_ORDERS else "/openApi/swap/v2/trade/order/test"
 
@@ -128,9 +121,8 @@ def webhook():
     return jsonify({"status": "ok", "flag": flag, "order_info": order_info})
 
 # ======================
-# 起動（Render / ローカル両対応）
+# メイン
 # ======================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # RenderはPORT、ローカルは5000
     app.logger.setLevel("INFO")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
