@@ -1,8 +1,7 @@
-from app import create_app
+from flask import Flask
 
-# Flask アプリ生成
-app = create_app()
+app = Flask(__name__)
 
-if __name__ == "__main__":
-    # 開発用サーバー起動（Render 上では gunicorn が使用）
-    app.run(host="0.0.0.0", port=5000, debug=True)
+@app.route("/")
+def hello():
+    return "Hello Flask Alert Bot!"
