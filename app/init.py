@@ -1,10 +1,9 @@
+# app/__init__.py
 from flask import Flask
 
-def create_app():
-    app = Flask(__name__)
-    
-    @app.route("/")
-    def hello():
-        return "Hello Flask App!"
-    
-    return app
+app = Flask(__name__)
+app.secret_key = "dev_secret_key"
+
+@app.route("/")
+def hello():
+    return "Hello Flask App!"
